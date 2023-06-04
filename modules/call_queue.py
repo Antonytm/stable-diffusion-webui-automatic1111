@@ -4,7 +4,7 @@ import threading
 import traceback
 import time
 
-from modules import shared
+from modules import shared, progress
 
 queue_lock = threading.Lock()
 
@@ -22,12 +22,24 @@ def wrap_queued_call(func):
 def wrap_gradio_gpu_call(func, extra_outputs=None):
     def f(*args, **kwargs):
 
-        shared.state.begin()
+        # if the first argument is a string that says "task(...)", it is treated as a job id
+        if len(args) > 0 and type(args[0]) == str and args[0][0:5] == "task(" and args[0][-1] == ")":
+            id_task = args[0]
+            progress.add_task_to_queue(id_task)
+        else:
+            id_task = None
 
         with queue_lock:
-            res = func(*args, **kwargs)
+            shared.state.begin()
+            progress.start_task(id_task)
 
-        shared.state.end()
+            try:
+                res = func(*args, **kwargs)
+                progress.record_results(id_task, res)
+            finally:
+                progress.finish_task(id_task)
+
+            shared.state.end()
 
         return res
 
@@ -48,7 +60,7 @@ def wrap_gradio_call(func, extra_outputs=None, add_stats=False):
             max_debug_str_len = 131072 # (1024*1024)/8
 
             print("Error completing request", file=sys.stderr)
-            argStr = f"Arguments: {str(args)} {str(kwargs)}"
+            argStr = f"Arguments: {args} {kwargs}"
             print(argStr[:max_debug_str_len], file=sys.stderr)
             if len(argStr) > max_debug_str_len:
                 print(f"(Argument list truncated at {max_debug_str_len}/{len(argStr)} characters)", file=sys.stderr)
@@ -61,7 +73,8 @@ def wrap_gradio_call(func, extra_outputs=None, add_stats=False):
             if extra_outputs_array is None:
                 extra_outputs_array = [None, '']
 
-            res = extra_outputs_array + [f"<div class='error'>{html.escape(type(e).__name__+': '+str(e))}</div>"]
+            error_message = f'{type(e).__name__}: {e}'
+            res = extra_outputs_array + [f"<div class='error'>{html.escape(error_message)}</div>"]
 
         shared.state.skipped = False
         shared.state.interrupted = False
